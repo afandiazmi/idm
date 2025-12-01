@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableDelayedExpansion
-set iasver=2.5.1
+set iasver=1.5.3
 
 ::============================================================================
 :: afandiazmi IDM Activation Script (Activator + Registry Cleaner)

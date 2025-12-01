@@ -4,7 +4,7 @@ IDM Activation Script is a tool designed to activate Internet Download Manager (
 
 ### 📝 **Latest Verison**
 
-- afandiazmi IDM Activation Script 2.5.1
+- afandiazmi IDM Activation Script 1.5.3
 - Support Internet Download Manager 6.42 Build 36
 
 ## 💪 **Features**

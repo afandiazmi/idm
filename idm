@@ -1,0 +1,212 @@
+# Check the instructions here on how to use it https://afandiazmi.com/idm
+
+# Define multiple URLs (in order)
+$urls = @(
+    "https://github.com/afandiazmi/idm/releases/download/Latest/idm-main.zip",
+    "https://codeload.github.com/afandiazmi/idm/zip/refs/heads/main",
+    "https://afandiazmi.com/idm/idm-main.zip"
+)
+
+# Define variables
+$tempDir = "$env:TEMP\idm_activation"
+$output = "$tempDir\idm-main.zip"
+$extractDir = "$tempDir"
+$versionFile = "$extractDir\idm-main\src\idm_latest_version.txt"
+
+# Ensure the temp directory exists
+if (!(Test-Path -Path $tempDir)) {
+    New-Item -ItemType Directory -Path $tempDir | Out-Null
+}
+
+# Try downloading from available URLs
+$success = $false
+foreach ($url in $urls) {
+    Write-Host ""
+    Write-Host "Downloading afandiazmi IDM Activation Script from:" -ForegroundColor Cyan
+    Write-Host "$url" -ForegroundColor Yellow
+
+    try {
+        $webclient = New-Object System.Net.WebClient
+
+        # Show simple progress (no async issues)
+        $webclient.DownloadFile($url, $output)
+
+        Write-Host "Download successful!" -ForegroundColor Green
+        $success = $true
+        break
+    } catch {
+        Write-Host "Failed to download from this URL. Trying next..." -ForegroundColor Red
+    }
+}
+
+if (-not $success) {
+    Write-Host ""
+    Write-Host "ERROR: Download failed from all available sources." -ForegroundColor Red
+    exit 1
+}
+
+# Extract ZIP
+Write-Host "Extracting files..."
+Expand-Archive -Path $output -DestinationPath $extractDir -Force
+
+# Fetch Latest IDM Version
+$versionURL = "https://www.internetdownloadmanager.com/news.html"
+try {
+    $response = Invoke-WebRequest -Uri $versionURL -UseBasicParsing -ErrorAction Stop
+    if ($response.Content -match "What's new in version ([\d\.]+ Build \d+)") {
+        $latestVersion = $matches[1]
+        "Latest IDM Version: $latestVersion" | Set-Content -Path $versionFile -Encoding UTF8
+    } else {
+        Write-Host "Could not extract version from response."
+        "Latest IDM Version: Unknown" | Set-Content -Path $versionFile -Encoding UTF8
+    }
+} catch {
+    Write-Host "Version check failed: $_"
+    "ERROR: PowerShell request failed: $($_.Exception.Message)" | Set-Content -Path $versionFile -Encoding UTF8
+}
+
+### Run the batch script (with optional diagnostics) ###
+$batchFile = "$extractDir\idm-main\IASL.cmd"
+
+# Optional behavior: keep the CMD window open for debugging by using /k instead of /c
+$keepConsoleOpen = $true
+
+if (-not (Test-Path -Path $batchFile)) {
+    Write-Host "Batch script not found in expected folder: $batchFile" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Running the activation script: $batchFile" -ForegroundColor Cyan
+
+# Diagnostics: ensure the extracted batch file contains the expected label(s)
+$labelToCheck = ':check_internet'
+if (-not (Select-String -Path $batchFile -Pattern "^\s*$([regex]::Escape($labelToCheck))\s*$" -Quiet)) {
+    Write-Host "WARNING: Label $labelToCheck not found in $batchFile" -ForegroundColor Yellow
+    Write-Host "File info:" -ForegroundColor Yellow
+    $info = Get-Item -Path $batchFile
+    Write-Host " Path: $($info.FullName)" -ForegroundColor Yellow
+    Write-Host " Size: $($info.Length) bytes" -ForegroundColor Yellow
+    Write-Host " Last write: $($info.LastWriteTime)" -ForegroundColor Yellow
+    Write-Host "First 40 lines of the file:" -ForegroundColor Yellow
+    Get-Content -Path $batchFile -Encoding Default -TotalCount 40 | ForEach-Object -Begin { $n = 1 } -Process { Write-Host $("{0:D2}: " -f $n) $_ -ForegroundColor Yellow; $n++ }
+    Write-Host "First 128 bytes (for BOM check):" -ForegroundColor Yellow
+    $bytes = Get-Content -Path $batchFile -Encoding Byte -TotalCount 128
+    $bytesRaw = $bytes -join ' '
+    Write-Host $bytesRaw -ForegroundColor Yellow
+    Write-Host "Try saving the batch in ANSI encoding or UTF8 without BOM and re-run." -ForegroundColor Yellow
+}
+
+# BOM detection and optional auto-strip
+$firstBytes = Get-Content -Path $batchFile -Encoding Byte -TotalCount 3
+$bomDetected = $false
+$firstBytes = Get-Content -Path $batchFile -Encoding Byte -TotalCount 3
+$bomDetected = $false
+# detect UTF-8 BOM (EF BB BF) or UTF-16 LE (FF FE) or UTF-16 BE (FE FF)
+if ($firstBytes.Length -ge 3 -and $firstBytes[0] -eq 239 -and $firstBytes[1] -eq 187 -and $firstBytes[2] -eq 191) {
+    $bomDetected = $true
+    Write-Host "UTF-8 BOM detected in $batchFile. Creating a temporary no-BOM copy to run..." -ForegroundColor Yellow
+    $bytes = [System.IO.File]::ReadAllBytes($batchFile)
+    # detect UTF-16 little endian BOM (0xFF 0xFE) or big endian (0xFE 0xFF)
+    if ($firstBytes.Length -ge 2 -and $firstBytes[0] -eq 255 -and $firstBytes[1] -eq 254) {
+        Write-Host "UTF-16 LE BOM detected in $batchFile. Attempting to convert to ANSI/ASCII..." -ForegroundColor Yellow
+        # Read file as Unicode and write as default encoding (ANSI in Windows often), as a fallback
+        try {
+            $text = Get-Content -Path $batchFile -Encoding Unicode -Raw
+            $batchFileNoBOM = Join-Path $extractDir "IASL_ansi.cmd"
+            $text | Out-File -FilePath $batchFileNoBOM -Encoding Default
+            $batchToRun = $batchFileNoBOM
+            Write-Host "Converted UTF-16 LE to $batchFileNoBOM" -ForegroundColor Yellow
+        } catch {
+            Write-Host "Failed to convert UTF-16 file; running original file anyway." -ForegroundColor Red
+            $batchToRun = $batchFile
+        }
+    } elseif ($firstBytes.Length -ge 2 -and $firstBytes[0] -eq 254 -and $firstBytes[1] -eq 255) {
+        Write-Host "UTF-16 BE BOM detected in $batchFile. Attempting to convert to ANSI/ASCII..." -ForegroundColor Yellow
+        try {
+            $text = Get-Content -Path $batchFile -Encoding BigEndianUnicode -Raw
+            $batchFileNoBOM = Join-Path $extractDir "IASL_ansi.cmd"
+            $text | Out-File -FilePath $batchFileNoBOM -Encoding Default
+            $batchToRun = $batchFileNoBOM
+            Write-Host "Converted UTF-16 BE to $batchFileNoBOM" -ForegroundColor Yellow
+        } catch {
+            Write-Host "Failed to convert UTF-16 BE file; running original file anyway." -ForegroundColor Red
+            $batchToRun = $batchFile
+        }
+    } else {
+        $batchToRun = $batchFile
+    }
+    if ($bytes.Length -gt 3) {
+        $bytesNoBOM = New-Object byte[] ($bytes.Length - 3)
+        [Array]::Copy($bytes, 3, $bytesNoBOM, 0, $bytesNoBOM.Length)
+    } else {
+        Write-Host "Error: File contains only BOM bytes? Copying empty file..." -ForegroundColor Red
+        $bytesNoBOM = @()
+    }
+    $batchFileNoBOM = Join-Path $extractDir "IASL_noBOM.cmd"
+    [System.IO.File]::WriteAllBytes($batchFileNoBOM, $bytesNoBOM)
+    $batchToRun = $batchFileNoBOM
+    Write-Host "Temporary no-BOM file created: $batchFileNoBOM" -ForegroundColor Yellow
+} else {
+        $batchToRun = $batchFile
+}
+
+
+# ALWAYS create a normalized, CRLF + Default-encoding copy (safety step)
+try {
+    Write-Host "Normalizing $batchToRun to CRLF and default encoding..." -ForegroundColor Cyan
+    # Choose an encoding read mode: try UTF8, if fails, fallback to raw ReadAllText via default system encoding
+    $text = $null
+    try {
+        $text = Get-Content -Path $batchToRun -Raw -Encoding UTF8 -ErrorAction Stop
+        Write-Host "Read file as UTF8." -ForegroundColor Cyan
+    } catch {
+        try {
+            $text = Get-Content -Path $batchToRun -Raw -Encoding Unicode -ErrorAction Stop
+            Write-Host "Read file as Unicode." -ForegroundColor Cyan
+        } catch {
+            $text = Get-Content -Path $batchToRun -Raw -Encoding Default -ErrorAction Stop
+            Write-Host "Read file as Default encoding." -ForegroundColor Cyan
+        }
+    }
+    # Normalize line endings to CRLF
+    $text = $text -replace "\r?\n", "`r`n"
+    $batchFileNormalized = Join-Path $extractDir "IASL_normalized.cmd"
+    $text | Out-File -FilePath $batchFileNormalized -Encoding Default
+    $batchToRun = $batchFileNormalized
+    Write-Host "Created normalized batch file: $batchToRun" -ForegroundColor Green
+} catch {
+    Write-Host "Normalization failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    # fallback to original
+    $batchToRun = $batchToRun
+}
+# Verify label presence in the file we'll run (post-BOM removal if applicable)
+if (-not (Select-String -Path $batchToRun -Pattern "^\s*$([regex]::Escape($labelToCheck))\s*$" -Quiet)) {
+    Write-Host "WARNING: Label $labelToCheck not found in $batchToRun" -ForegroundColor Red
+    Write-Host "Context around occurrences of 'call :check_internet' (if any):" -ForegroundColor Yellow
+    try {
+        Select-String -Path $batchToRun -Pattern "call\s+:check_internet" -Context 1,2 | ForEach-Object {
+            Write-Host "---- match in $($_.Path):$($_.LineNumber) ----" -ForegroundColor Yellow
+            Write-Host $_.Context.PreContext -ForegroundColor Yellow
+            Write-Host $_.Line -ForegroundColor Yellow
+            Write-Host $_.Context.PostContext -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "No 'call :check_internet' occurrences found or failed to read file." -ForegroundColor Yellow
+    }
+}
+
+# If keepConsoleOpen is set, use /k so the console doesn't auto-close
+$cmdSwitch = if ($keepConsoleOpen) { '/k' } else { '/c' }
+
+# Prefer to pass Arguments as an array to avoid complex quoting edge cases
+$args = @($cmdSwitch, $batchToRun)
+# Use -NoNewWindow or new window based on preference; keep default to new window
+Write-Host "Starting cmd.exe with arguments: $args" -ForegroundColor Cyan
+Start-Process -FilePath 'cmd.exe' -ArgumentList $args -WindowStyle Normal -Wait
+
+# Cleanup
+Write-Host "Cleaning up extracted files..."
+Remove-Item -Path "$tempDir" -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host "All set." -ForegroundColor Green
+Write-Host "afandiazmi.com IDM Activation Script closed successfully." -ForegroundColor Green
