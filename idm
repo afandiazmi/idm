@@ -2,9 +2,9 @@
 
 # Define multiple URLs (in order)
 $urls = @(
-    "https://github.com/afandiazmi/idm/releases/download/Latest/idm-main.zip",
     "https://codeload.github.com/afandiazmi/idm/zip/refs/heads/main",
-    "https://afandiazmi.com/idm/idm-main.zip"
+    "https://afandiazmi.com/idm/idm-main.zip",
+    "https://github.com/afandiazmi/idm/releases/download/Latest/idm-main.zip"
 )
 
 # Define variables
@@ -49,6 +49,48 @@ if (-not $success) {
 Write-Host "Extracting files..."
 Expand-Archive -Path $output -DestinationPath $extractDir -Force
 
+# Smart detection: recursively search for IASL.cmd (handles any nested structure)
+Write-Host "Searching for IASL.cmd in extracted files..." -ForegroundColor Cyan
+$iaslFiles = Get-ChildItem -Path $extractDir -Filter "IASL.cmd" -Recurse -ErrorAction SilentlyContinue
+
+if ($iaslFiles.Count -eq 0) {
+    Write-Host "ERROR: Could not find IASL.cmd in extracted archive." -ForegroundColor Red
+    Write-Host "Extracted structure:" -ForegroundColor Yellow
+    Get-ChildItem -Path $extractDir -Recurse -Depth 2 | Select-Object FullName | Format-Table -AutoSize
+    exit 1
+}
+
+# Use the first found IASL.cmd and get its parent directory
+$extractedIasl = $iaslFiles[0].FullName
+$foundPath = $iaslFiles[0].DirectoryName
+Write-Host "Found IASL.cmd at: $extractedIasl" -ForegroundColor Green
+Write-Host "Using base directory: $foundPath" -ForegroundColor Green
+
+# Update paths to use the detected structure
+$versionFile = Join-Path $foundPath "src\idm_latest_version.txt"
+if (Test-Path -Path $extractedIasl) {
+    Write-Host "Found extracted IASL.cmd at: $extractedIasl" -ForegroundColor Cyan
+    $text = Get-Content -Path $extractedIasl -Raw -Encoding Default
+    # extract version line
+    if ($text -match "set\s+iasver=([\d\.]+)") {
+        $releaseVer = $matches[1]
+        Write-Host "IASL.cmd Release version found in file: $releaseVer" -ForegroundColor Green
+    } else {
+        Write-Host "Could not find 'iasver' version inside IASL.cmd" -ForegroundColor Yellow
+    }
+    # compute SHA256
+    try {
+        $sha = Get-FileHash -Path $extractedIasl -Algorithm SHA256
+        Write-Host "IASL.cmd SHA256: $($sha.Hash)" -ForegroundColor Cyan
+    } catch {
+        Write-Host "Could not compute hash: $_" -ForegroundColor Yellow
+    }
+    Write-Host "First 8 lines of extracted IASL.cmd (for quick diagnosis):" -ForegroundColor Cyan
+    Get-Content -Path $extractedIasl -Encoding Default -TotalCount 8 | ForEach-Object -Begin { $n = 1 } -Process { Write-Host $('{0:D2}: ' -f $n) $_; $n++ }
+} else {
+    Write-Host "Warning: IASL.cmd not found in extracted archive." -ForegroundColor Yellow
+}
+
 # Fetch Latest IDM Version
 $versionURL = "https://www.internetdownloadmanager.com/news.html"
 try {
@@ -66,7 +108,7 @@ try {
 }
 
 ### Run the batch script (with optional diagnostics) ###
-$batchFile = "$extractDir\idm-main\IASL.cmd"
+$batchFile = Join-Path $foundPath "IASL.cmd"
 
 # Optional behavior: keep the CMD window open for debugging by using /k instead of /c
 $keepConsoleOpen = $true
@@ -112,7 +154,8 @@ if ($firstBytes.Length -ge 3 -and $firstBytes[0] -eq 239 -and $firstBytes[1] -eq
         # Read file as Unicode and write as default encoding (ANSI in Windows often), as a fallback
         try {
             $text = Get-Content -Path $batchFile -Encoding Unicode -Raw
-            $batchFileNoBOM = Join-Path $extractDir "IASL_ansi.cmd"
+            # Save in same directory as original batch file
+            $batchFileNoBOM = Join-Path $foundPath "IASL_ansi.cmd"
             $text | Out-File -FilePath $batchFileNoBOM -Encoding Default
             $batchToRun = $batchFileNoBOM
             Write-Host "Converted UTF-16 LE to $batchFileNoBOM" -ForegroundColor Yellow
@@ -124,7 +167,8 @@ if ($firstBytes.Length -ge 3 -and $firstBytes[0] -eq 239 -and $firstBytes[1] -eq
         Write-Host "UTF-16 BE BOM detected in $batchFile. Attempting to convert to ANSI/ASCII..." -ForegroundColor Yellow
         try {
             $text = Get-Content -Path $batchFile -Encoding BigEndianUnicode -Raw
-            $batchFileNoBOM = Join-Path $extractDir "IASL_ansi.cmd"
+            # Save in same directory as original batch file
+            $batchFileNoBOM = Join-Path $foundPath "IASL_ansi.cmd"
             $text | Out-File -FilePath $batchFileNoBOM -Encoding Default
             $batchToRun = $batchFileNoBOM
             Write-Host "Converted UTF-16 BE to $batchFileNoBOM" -ForegroundColor Yellow
@@ -142,7 +186,8 @@ if ($firstBytes.Length -ge 3 -and $firstBytes[0] -eq 239 -and $firstBytes[1] -eq
         Write-Host "Error: File contains only BOM bytes? Copying empty file..." -ForegroundColor Red
         $bytesNoBOM = @()
     }
-    $batchFileNoBOM = Join-Path $extractDir "IASL_noBOM.cmd"
+    # Save in same directory as original batch file
+    $batchFileNoBOM = Join-Path $foundPath "IASL_noBOM.cmd"
     [System.IO.File]::WriteAllBytes($batchFileNoBOM, $bytesNoBOM)
     $batchToRun = $batchFileNoBOM
     Write-Host "Temporary no-BOM file created: $batchFileNoBOM" -ForegroundColor Yellow
@@ -170,7 +215,8 @@ try {
     }
     # Normalize line endings to CRLF
     $text = $text -replace "\r?\n", "`r`n"
-    $batchFileNormalized = Join-Path $extractDir "IASL_normalized.cmd"
+    # Save normalized file in the SAME directory as original IASL.cmd (so src/ folder is accessible)
+    $batchFileNormalized = Join-Path $foundPath "IASL_normalized.cmd"
     $text | Out-File -FilePath $batchFileNormalized -Encoding Default
     $batchToRun = $batchFileNormalized
     Write-Host "Created normalized batch file: $batchToRun" -ForegroundColor Green
